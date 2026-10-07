@@ -1,0 +1,87 @@
+#!/usr/bin/python3 -I
+"""Restricted root helper: fixed device and commands; no arbitrary paths or packets."""
+import json,os,sys,time,fcntl,importlib.util
+from pathlib import Path
+BASE=Path('/sys/bus/wmi/devices/B60BFB48-3E5B-49E4-A0E9-8CFFE1B3434B/jiaolong')
+EXPECTED={'sys_vendor':'MECHREVO','board_name':'MRID6-23','bios_version':'MRID6_23_P_V36'}
+def validate(require_firmware=True):
+ for key,value in EXPECTED.items():
+  if (Path('/sys/class/dmi/id')/key).read_text().strip()!=value:raise RuntimeError('机型或 BIOS 与适配版本不符')
+ if require_firmware and not BASE.is_dir():raise RuntimeError('硬件通信驱动尚未加载')
+def native_module():
+ spec=importlib.util.spec_from_file_location('jiaolong_native','/usr/local/libexec/jiaolong-native.py')
+ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+def state():return json.loads((BASE/'state').read_text())
+def write(key,text):
+ with (BASE/key).open('w') as f:f.write(str(text)+'\n')
+def main():
+ if os.geteuid()!=0:raise RuntimeError('需要通过系统管理员认证')
+ validate(False)
+ if len(sys.argv)==2 and sys.argv[1]=='status':print(json.dumps(state()));return
+ if len(sys.argv)!=3:raise ValueError('参数数量错误')
+ action,arg=sys.argv[1:]
+ if action in ('num_lock','caps_lock','gpu_offset'):
+  module=native_module()
+  if action=='gpu_offset':result=module.set_gpu_offset(int(arg))
+  else:result=module.set_lock(action,int(arg))
+  print(json.dumps({'action':action,**result}));return
+ validate()
+ ranges={'profile':(0,2),'gpu_mode':(0,1),'kb_brightness':(0,3),'kb_mode':(0,3),'fn_lock':(0,1),'touchpad_lock':(0,1),'ambient_light':(0,1),'cpu_custom_mode':(0,1)}
+ before=state()
+ if action in ranges:
+  v=int(arg);lo,hi=ranges[action]
+  if not lo<=v<=hi:raise ValueError('参数超出允许范围')
+  if action=='profile':
+   if before['ac_type']==1:raise RuntimeError('原厂限制：Type-C 供电时不切换固件档位')
+   if v==1 and not any((p/'online').exists() and (p/'online').read_text().strip()=='1' for p in Path('/sys/class/power_supply').glob('*') if (p/'type').exists() and (p/'type').read_text().strip()=='Mains'):
+    raise RuntimeError('狂飙模式需要连接电源适配器')
+   write('fan_auto',1)
+  write(action,v);time.sleep(.15);after=state()
+  if after[action]!=v:raise RuntimeError('已发送命令，但固件读回值不符')
+ elif action=='kb_color':
+  rgb=[int(x) for x in arg.split(',')]
+  if len(rgb)!=3 or any(not 0<=x<=255 for x in rgb):raise ValueError('RGB 参数错误')
+  write('kb_mode',2);time.sleep(.5);write('kb_color',' '.join(map(str,rgb)));time.sleep(.15);after=state()
+  if after['kb_color']!=rgb:raise RuntimeError('已发送颜色命令，但固件读回值不符')
+ elif action=='cpu_limits':
+  values=[int(x) for x in arg.split(',')]
+  if len(values)!=3:raise ValueError('需要 SPL、SPPT、温度墙三个参数')
+  spl,sppt,temp=values
+  if not (25<=spl<=110 and spl<=sppt<=150 and 60<=temp<=100):raise ValueError('功耗或温度参数超出范围')
+  original=[before['cpu_spl_w'],before['cpu_sppt_w'],before['cpu_temp_wall']]
+  if not (25<=original[0]<=110 and original[0]<=original[1]<=150 and 60<=original[2]<=100):
+   raise RuntimeError('当前固件参数无法可靠恢复，拒绝更改')
+  try:
+   write('cpu_custom_mode',1)
+   if state()['cpu_custom_mode']!=1:raise RuntimeError('固件拒绝启用自定义模式，请检查电源适配器')
+   write('cpu_limits',' '.join(map(str,values)));after=state()
+   if [after['cpu_spl_w'],after['cpu_sppt_w'],after['cpu_temp_wall']]!=values:raise RuntimeError('自定义参数读回值不符')
+  except Exception:
+   if state()['cpu_custom_mode']==1:write('cpu_limits',' '.join(map(str,original)))
+   write('cpu_custom_mode',before['cpu_custom_mode'])
+   if before['cpu_custom_mode']==0:write('profile',before['profile'])
+   raise
+ elif action=='fan_auto' and arg=='1':
+  write('fan_auto',1);after=state()
+  if after['fan_override']!=0:raise RuntimeError('固件没有恢复自动风扇控制')
+ elif action in ('fan_rpm','fan_custom_rpm'):
+  rpm=int(arg)
+  limits={0:(3500,5000),1:(5000,5800),2:(2200,3500)}
+  lo,hi=(2200,5800) if action=='fan_custom_rpm' else limits.get(before['profile'],(0,0))
+  if not lo<=rpm<=hi or rpm%100:raise ValueError('转速超出允许范围或未按 100 RPM 步进')
+  if action=='fan_custom_rpm' and not (BASE/action).exists():raise RuntimeError('请先更新硬件通信驱动')
+  try:
+   write(action,rpm);time.sleep(.2);after=state()
+   if after['fan_override']!=1 or after['fan_max_rpm']!=rpm:raise RuntimeError('风扇上限的固件读回值不符')
+  except Exception:
+   if (BASE/'fan_custom_rpm').exists():write('fan_custom_rpm',before['fan_max_rpm'])
+   if before['fan_override']==0:write('fan_auto',1)
+   raise
+ else:raise ValueError('不支持的操作')
+ print(json.dumps({'action':action,'before':before,'after':after}))
+if __name__=='__main__':
+ try:
+  if os.geteuid()!=0:raise RuntimeError('需要通过系统管理员认证')
+  with open('/run/jiaolong-control.lock','a') as lock:
+   os.chmod('/run/jiaolong-control.lock',0o600);fcntl.flock(lock,fcntl.LOCK_EX);main()
+ except Exception as e:print(str(e),file=sys.stderr);sys.exit(1)
