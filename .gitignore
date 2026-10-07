@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.o
+*.mod
+*.mod.c
+.*.cmd
+modules.order
+Module.symvers
+*.log
+*.previous
+*.bak
+.env
+.env.*
