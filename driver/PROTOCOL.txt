@@ -1,0 +1,11 @@
+Evidence: installed factory application version 0.3.15; owner machine SSDT4.WMAA and DSDT H_EC fields.
+Read packet [1]=250, write packet [1]=251; command at [3], payload starts at [4].
+Fan SET20: FAAP <- FUN3; SET21: FASP <- FUN3; GET20/GET21 read these fields.
+Factory UI labels: current fan speed / maximum fan speed.
+Factory per-mode max ranges: quiet 2200-3500, balanced 3500-5000, performance 5000-5800 RPM.
+User-requested custom control exposes 2200-5800 RPM in 100 RPM steps through the same SET20/SET21 packets, without changing the system performance profile.
+GET21 readback confirms the maximum parameter only. Actual CPU/GPU RPM comes from GET13 and remains temperature/firmware dependent; idle RPM is not a fixed-target speed test.
+Keyboard color requires mode 2, 500ms delay, then command17 RGB.
+CPU cmd23 selectors: 0 exit custom, 1 enable custom, 2 SPL, 3 SPPT, 4 temperature wall.
+DSDT Field addresses: CSPL=f6, FPPT=f7, CTCL=f8.
+No factory binaries or full decompiled source are redistributed.
